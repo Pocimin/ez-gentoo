@@ -1,0 +1,28 @@
+# Local VM/image artifacts
+*.iso
+*.qcow2
+*.vhd
+*.vhdx
+*.avhdx
+*.zip
+*.7z
+*.sha256
+
+# Local secrets and generated files
+ssh/
+known_hosts
+*.log
+make.conf
+gentoo-repos.conf
+!templates/
+!templates/make.conf
+!templates/gentoo-repos.conf
+
+# Scratch/screenshots from development
+*.png
+www/
+
+# Windows/PowerShell noise
+Thumbs.db
+Desktop.ini
+*.ps1xml

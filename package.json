@@ -1,0 +1,25 @@
+{
+  "name": "ez-gentoo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-click Gentoo VM installer and launcher for Windows Hyper-V.",
+  "keywords": [
+    "gentoo",
+    "gentoo-linux",
+    "gentoo-vm",
+    "gentoo-installer",
+    "hyper-v",
+    "linux-vm",
+    "virtual-machine",
+    "windows",
+    "xfce",
+    "vnc",
+    "tiger-vnc",
+    "linux-for-beginners",
+    "linux-larp",
+    "install-gentoo",
+    "easy-gentoo"
+  ],
+  "license": "MIT"
+}
+
