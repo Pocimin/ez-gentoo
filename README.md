@@ -16,7 +16,22 @@ One-click Gentoo VM installer and launcher for Windows Hyper-V.
 
 ## Quick Start
 
-Run PowerShell as Administrator:
+Download the latest `ez-gentoo-windows-x64.zip` from Releases, unzip it, then run:
+
+```text
+EzGentooInstaller.exe
+```
+
+The installer opens a small UI where you can choose:
+
+- VM name
+- install folder
+- RAM
+- CPU count
+- virtual disk size
+- base image URL
+
+You can also run PowerShell directly:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\ez-gentoo.ps1
@@ -61,6 +76,22 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\export-current-vm.ps1 -Vm
 
 Upload the generated `.zip` or `.vhdx` from `dist/` to a GitHub Release.
 
+## Building The EXEs
+
+Requires .NET 8 SDK:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\build-exe.ps1
+```
+
+This creates:
+
+```text
+dist/ez-gentoo-windows-x64/EzGentooInstaller.exe
+dist/ez-gentoo-windows-x64/EzGentooLauncher.exe
+dist/ez-gentoo-windows-x64.zip
+```
+
 ## Guest Defaults
 
 The prepared image should provide:
@@ -81,4 +112,3 @@ Gentoo VM installer, easy Gentoo installer, one-click Gentoo VM, Hyper-V Gentoo,
 ## Status
 
 Early but usable. Windows + Hyper-V is the first supported target.
-

@@ -1,10 +1,13 @@
 param(
     [string]$VmName = "EzGentoo",
     [string]$ImageUrl = "https://github.com/Pocimin/ez-gentoo/releases/latest/download/ez-gentoo-base.vhdx",
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "EzGentoo"),
     [int]$MemoryGB = 4,
     [int]$CpuCount = 4,
+    [int]$DiskSizeGB = 40,
     [int]$VncDisplay = 1,
-    [int]$VncPort = 5901
+    [int]$VncPort = 5901,
+    [switch]$AutoRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,10 +25,13 @@ if (-not (Test-IsAdmin)) {
         "-File", "`"$PSCommandPath`"",
         "-VmName", "`"$VmName`"",
         "-ImageUrl", "`"$ImageUrl`"",
+        "-InstallDir", "`"$InstallDir`"",
         "-MemoryGB", "$MemoryGB",
         "-CpuCount", "$CpuCount",
+        "-DiskSizeGB", "$DiskSizeGB",
         "-VncDisplay", "$VncDisplay",
-        "-VncPort", "$VncPort"
+        "-VncPort", "$VncPort",
+        $(if ($AutoRun) { "-AutoRun" })
     )
     exit
 }
@@ -33,20 +39,36 @@ if (-not (Test-IsAdmin)) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$AppDir = Join-Path $env:LOCALAPPDATA "EzGentoo"
-$VmDir = Join-Path $AppDir "vm"
-$ImagePath = Join-Path $AppDir "ez-gentoo-base.vhdx"
-$LogPath = Join-Path $AppDir "ez-gentoo.log"
+$script:VmName = $VmName
+$script:ImageUrl = $ImageUrl
+$script:InstallDir = $InstallDir
+$script:MemoryGB = $MemoryGB
+$script:CpuCount = $CpuCount
+$script:DiskSizeGB = $DiskSizeGB
+$script:VncDisplay = $VncDisplay
+$script:VncPort = $VncPort
+$script:AppDir = $InstallDir
+$script:VmDir = Join-Path $script:AppDir "vm"
+$script:ImagePath = Join-Path $script:AppDir "ez-gentoo-base.vhdx"
+$script:LogPath = Join-Path $script:AppDir "ez-gentoo.log"
 $ViewerPath = "C:\Program Files\TigerVNC\vncviewer.exe"
 $MacAddress = $null
 $CurrentIp = $null
 $IsBusy = $false
 
-New-Item -ItemType Directory -Force -Path $AppDir, $VmDir | Out-Null
+function Set-AppPaths {
+    $script:AppDir = $script:InstallDir
+    $script:VmDir = Join-Path $script:AppDir "vm"
+    $script:ImagePath = Join-Path $script:AppDir "ez-gentoo-base.vhdx"
+    $script:LogPath = Join-Path $script:AppDir "ez-gentoo.log"
+    New-Item -ItemType Directory -Force -Path $script:AppDir, $script:VmDir | Out-Null
+}
+
+Set-AppPaths
 
 function Write-AppLog([string]$Message) {
     $line = "{0:HH:mm:ss}  {1}" -f (Get-Date), $Message
-    try { Add-Content -Path $LogPath -Value $line -Encoding ASCII } catch { }
+    try { Add-Content -Path $script:LogPath -Value $line -Encoding ASCII } catch { }
     if ($script:LogBox) {
         $script:LogBox.AppendText($line + [Environment]::NewLine)
     }
@@ -115,8 +137,9 @@ function Select-LocalImage {
 }
 
 function Ensure-BaseImage {
-    if (Test-Path $ImagePath) {
+    if (Test-Path $script:ImagePath) {
         Write-AppLog "Base image already exists."
+        Ensure-DiskSize
         return
     }
 
@@ -130,8 +153,9 @@ function Ensure-BaseImage {
     if ($choice -eq "Cancel") { throw "Install cancelled." }
 
     if ($choice -eq "Yes") {
-        Write-AppLog "Downloading $ImageUrl."
-        Invoke-WebRequest -Uri $ImageUrl -OutFile $ImagePath
+        Write-AppLog "Downloading $script:ImageUrl."
+        Invoke-WebRequest -Uri $script:ImageUrl -OutFile $script:ImagePath
+        Ensure-DiskSize
         return
     }
 
@@ -140,35 +164,49 @@ function Ensure-BaseImage {
 
     if ($local -like "*.vhdx") {
         Write-AppLog "Copying VHDX image."
-        Copy-Item -LiteralPath $local -Destination $ImagePath -Force
+        Copy-Item -LiteralPath $local -Destination $script:ImagePath -Force
+        Ensure-DiskSize
         return
     }
 
     if ($local -like "*.qcow2") {
         $qemu = Get-QemuImg
         Write-AppLog "Converting QCOW2 to VHDX with qemu-img."
-        & $qemu convert -p -O vhdx $local $ImagePath
+        & $qemu convert -p -O vhdx $local $script:ImagePath
         if ($LASTEXITCODE -ne 0) { throw "qemu-img conversion failed." }
+        Ensure-DiskSize
         return
     }
 
     throw "Unsupported image type: $local"
 }
 
+function Ensure-DiskSize {
+    if (-not (Test-Path $script:ImagePath)) { return }
+    if ($script:DiskSizeGB -le 0) { return }
+
+    $targetBytes = [int64]$script:DiskSizeGB * 1GB
+    $vhd = Get-VHD -Path $script:ImagePath -ErrorAction SilentlyContinue
+    if ($vhd -and $vhd.Size -lt $targetBytes) {
+        Write-AppLog "Resizing virtual disk to $script:DiskSizeGB GB."
+        Resize-VHD -Path $script:ImagePath -SizeBytes $targetBytes
+    }
+}
+
 function Ensure-Vm {
-    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    $vm = Get-VM -Name $script:VmName -ErrorAction SilentlyContinue
     if ($vm) {
-        Write-AppLog "VM '$VmName' already exists."
+        Write-AppLog "VM '$script:VmName' already exists."
         return $vm
     }
 
-    Write-AppLog "Creating VM '$VmName'."
-    $memoryBytes = [int64]$MemoryGB * 1GB
+    Write-AppLog "Creating VM '$script:VmName'."
+    $memoryBytes = [int64]$script:MemoryGB * 1GB
     $minMemoryBytes = [int64]2 * 1GB
-    $vm = New-VM -Name $VmName -Generation 2 -MemoryStartupBytes $memoryBytes -VHDPath $ImagePath -Path $VmDir -SwitchName "Default Switch"
-    Set-VMProcessor -VMName $VmName -Count $CpuCount
-    Set-VMFirmware -VMName $VmName -EnableSecureBoot Off
-    Set-VMMemory -VMName $VmName -DynamicMemoryEnabled $true -MinimumBytes $minMemoryBytes -StartupBytes $memoryBytes -MaximumBytes $memoryBytes
+    $vm = New-VM -Name $script:VmName -Generation 2 -MemoryStartupBytes $memoryBytes -VHDPath $script:ImagePath -Path $script:VmDir -SwitchName "Default Switch"
+    Set-VMProcessor -VMName $script:VmName -Count $script:CpuCount
+    Set-VMFirmware -VMName $script:VmName -EnableSecureBoot Off
+    Set-VMMemory -VMName $script:VmName -DynamicMemoryEnabled $true -MinimumBytes $minMemoryBytes -StartupBytes $memoryBytes -MaximumBytes $memoryBytes
     return $vm
 }
 
@@ -190,7 +228,7 @@ function Test-TcpPort([string]$Ip, [int]$Port, [int]$TimeoutMs = 900) {
 function Get-CandidateIps {
     $ips = New-Object System.Collections.Generic.List[string]
 
-    $adapter = Get-VMNetworkAdapter -VMName $VmName -ErrorAction SilentlyContinue
+    $adapter = Get-VMNetworkAdapter -VMName $script:VmName -ErrorAction SilentlyContinue
     if ($adapter) {
         if (-not $script:MacAddress) {
             $script:MacAddress = Convert-MacToDashed $adapter.MacAddress
@@ -231,7 +269,7 @@ function Wait-ForVnc {
                 Write-AppLog "Found candidate IP $ip."
             }
 
-            if (Test-TcpPort -Ip $ip -Port $VncPort) {
+            if (Test-TcpPort -Ip $ip -Port $script:VncPort) {
                 $script:CurrentIp = $ip
                 return $ip
             }
@@ -247,7 +285,7 @@ function Wait-ForVnc {
 
 function Open-Viewer([string]$Ip) {
     if (-not (Test-Path $ViewerPath)) { throw "TigerVNC viewer not found." }
-    Start-Process -FilePath $ViewerPath -ArgumentList @("-FullScreen", "$Ip`:$VncDisplay")
+    Start-Process -FilePath $ViewerPath -ArgumentList @("-FullScreen", "$Ip`:$script:VncDisplay")
 }
 
 function Install-Start-Connect {
@@ -262,21 +300,21 @@ function Install-Start-Connect {
 
         Set-Status "Creating VM..." 40
         $vm = Ensure-Vm
-        $adapter = Get-VMNetworkAdapter -VMName $VmName
+        $adapter = Get-VMNetworkAdapter -VMName $script:VmName
         $script:MacAddress = Convert-MacToDashed $adapter.MacAddress
         Write-AppLog "Tracking VM MAC $script:MacAddress."
 
         if ($vm.State -ne "Running") {
             Set-Status "Starting VM..." 55
             Write-AppLog "Starting VM."
-            Start-VM -Name $VmName
+            Start-VM -Name $script:VmName
         }
 
         $ip = Wait-ForVnc
-        Set-Status "Opening TigerVNC at $ip`:$VncDisplay" 95
-        Write-AppLog "VNC ready at $ip`:$VncDisplay."
+        Set-Status "Opening TigerVNC at $ip`:$script:VncDisplay" 95
+        Write-AppLog "VNC ready at $ip`:$script:VncDisplay."
         Open-Viewer $ip
-        Set-Status "Ready: $ip`:$VncDisplay" 100
+        Set-Status "Ready: $ip`:$script:VncDisplay" 100
     }
     catch {
         Set-Status "Error: $($_.Exception.Message)" 0
@@ -292,8 +330,8 @@ function Stop-EzGentoo {
     if ($script:IsBusy) { return }
     Set-Busy $true
     try {
-        Write-AppLog "Turning off VM '$VmName'."
-        Stop-VM -Name $VmName -TurnOff -Force
+        Write-AppLog "Turning off VM '$script:VmName'."
+        Stop-VM -Name $script:VmName -TurnOff -Force
         $script:CurrentIp = $null
         Set-Status "VM stopped" 0
     }
@@ -304,11 +342,26 @@ function Stop-EzGentoo {
     finally { Set-Busy $false }
 }
 
+function Apply-UiSettings {
+    $script:VmName = $script:VmNameText.Text.Trim()
+    $script:ImageUrl = $script:ImageUrlText.Text.Trim()
+    $script:InstallDir = $script:InstallDirText.Text.Trim()
+    $script:MemoryGB = [int]$script:MemoryInput.Value
+    $script:CpuCount = [int]$script:CpuInput.Value
+    $script:DiskSizeGB = [int]$script:DiskInput.Value
+
+    if ([string]::IsNullOrWhiteSpace($script:VmName)) { throw "VM name is required." }
+    if ([string]::IsNullOrWhiteSpace($script:InstallDir)) { throw "Install folder is required." }
+    if ([string]::IsNullOrWhiteSpace($script:ImageUrl)) { throw "Image URL is required." }
+
+    Set-AppPaths
+}
+
 $form = New-Object Windows.Forms.Form
 $form.Text = "ez gentoo"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object Drawing.Size(590, 430)
-$form.MinimumSize = New-Object Drawing.Size(540, 370)
+$form.Size = New-Object Drawing.Size(700, 610)
+$form.MinimumSize = New-Object Drawing.Size(660, 560)
 $form.Font = New-Object Drawing.Font("Segoe UI", 9)
 
 $title = New-Object Windows.Forms.Label
@@ -338,50 +391,145 @@ $script:Progress.Minimum = 0
 $script:Progress.Maximum = 100
 $form.Controls.Add($script:Progress)
 
+$vmNameLabel = New-Object Windows.Forms.Label
+$vmNameLabel.Text = "VM name"
+$vmNameLabel.Location = New-Object Drawing.Point(24, 148)
+$vmNameLabel.Size = New-Object Drawing.Size(90, 22)
+$form.Controls.Add($vmNameLabel)
+
+$script:VmNameText = New-Object Windows.Forms.TextBox
+$script:VmNameText.Text = $script:VmName
+$script:VmNameText.Location = New-Object Drawing.Point(120, 145)
+$script:VmNameText.Size = New-Object Drawing.Size(180, 24)
+$form.Controls.Add($script:VmNameText)
+
+$installLabel = New-Object Windows.Forms.Label
+$installLabel.Text = "Install folder"
+$installLabel.Location = New-Object Drawing.Point(24, 182)
+$installLabel.Size = New-Object Drawing.Size(90, 22)
+$form.Controls.Add($installLabel)
+
+$script:InstallDirText = New-Object Windows.Forms.TextBox
+$script:InstallDirText.Text = $script:InstallDir
+$script:InstallDirText.Location = New-Object Drawing.Point(120, 179)
+$script:InstallDirText.Size = New-Object Drawing.Size(438, 24)
+$form.Controls.Add($script:InstallDirText)
+
+$browseButton = New-Object Windows.Forms.Button
+$browseButton.Text = "Browse"
+$browseButton.Location = New-Object Drawing.Point(568, 178)
+$browseButton.Size = New-Object Drawing.Size(82, 28)
+$form.Controls.Add($browseButton)
+
+$imageLabel = New-Object Windows.Forms.Label
+$imageLabel.Text = "Image URL"
+$imageLabel.Location = New-Object Drawing.Point(24, 216)
+$imageLabel.Size = New-Object Drawing.Size(90, 22)
+$form.Controls.Add($imageLabel)
+
+$script:ImageUrlText = New-Object Windows.Forms.TextBox
+$script:ImageUrlText.Text = $script:ImageUrl
+$script:ImageUrlText.Location = New-Object Drawing.Point(120, 213)
+$script:ImageUrlText.Size = New-Object Drawing.Size(530, 24)
+$form.Controls.Add($script:ImageUrlText)
+
+$ramLabel = New-Object Windows.Forms.Label
+$ramLabel.Text = "RAM GB"
+$ramLabel.Location = New-Object Drawing.Point(24, 250)
+$ramLabel.Size = New-Object Drawing.Size(90, 22)
+$form.Controls.Add($ramLabel)
+
+$script:MemoryInput = New-Object Windows.Forms.NumericUpDown
+$script:MemoryInput.Minimum = 2
+$script:MemoryInput.Maximum = 64
+$script:MemoryInput.Value = $script:MemoryGB
+$script:MemoryInput.Location = New-Object Drawing.Point(120, 247)
+$script:MemoryInput.Size = New-Object Drawing.Size(70, 24)
+$form.Controls.Add($script:MemoryInput)
+
+$cpuLabel = New-Object Windows.Forms.Label
+$cpuLabel.Text = "CPUs"
+$cpuLabel.Location = New-Object Drawing.Point(214, 250)
+$cpuLabel.Size = New-Object Drawing.Size(45, 22)
+$form.Controls.Add($cpuLabel)
+
+$script:CpuInput = New-Object Windows.Forms.NumericUpDown
+$script:CpuInput.Minimum = 1
+$script:CpuInput.Maximum = 32
+$script:CpuInput.Value = $script:CpuCount
+$script:CpuInput.Location = New-Object Drawing.Point(264, 247)
+$script:CpuInput.Size = New-Object Drawing.Size(70, 24)
+$form.Controls.Add($script:CpuInput)
+
+$diskLabel = New-Object Windows.Forms.Label
+$diskLabel.Text = "Disk GB"
+$diskLabel.Location = New-Object Drawing.Point(360, 250)
+$diskLabel.Size = New-Object Drawing.Size(60, 22)
+$form.Controls.Add($diskLabel)
+
+$script:DiskInput = New-Object Windows.Forms.NumericUpDown
+$script:DiskInput.Minimum = 20
+$script:DiskInput.Maximum = 512
+$script:DiskInput.Value = $script:DiskSizeGB
+$script:DiskInput.Location = New-Object Drawing.Point(426, 247)
+$script:DiskInput.Size = New-Object Drawing.Size(80, 24)
+$form.Controls.Add($script:DiskInput)
+
 $script:InstallButton = New-Object Windows.Forms.Button
 $script:InstallButton.Text = "Install / Start"
-$script:InstallButton.Location = New-Object Drawing.Point(24, 148)
+$script:InstallButton.Location = New-Object Drawing.Point(24, 292)
 $script:InstallButton.Size = New-Object Drawing.Size(115, 34)
 $form.Controls.Add($script:InstallButton)
 
 $script:StartButton = New-Object Windows.Forms.Button
 $script:StartButton.Text = "Start Only"
-$script:StartButton.Location = New-Object Drawing.Point(150, 148)
+$script:StartButton.Location = New-Object Drawing.Point(150, 292)
 $script:StartButton.Size = New-Object Drawing.Size(95, 34)
 $form.Controls.Add($script:StartButton)
 
 $script:ViewerButton = New-Object Windows.Forms.Button
 $script:ViewerButton.Text = "Open Viewer"
-$script:ViewerButton.Location = New-Object Drawing.Point(256, 148)
+$script:ViewerButton.Location = New-Object Drawing.Point(256, 292)
 $script:ViewerButton.Size = New-Object Drawing.Size(105, 34)
 $script:ViewerButton.Enabled = $false
 $form.Controls.Add($script:ViewerButton)
 
 $script:StopButton = New-Object Windows.Forms.Button
 $script:StopButton.Text = "Stop VM"
-$script:StopButton.Location = New-Object Drawing.Point(372, 148)
+$script:StopButton.Location = New-Object Drawing.Point(372, 292)
 $script:StopButton.Size = New-Object Drawing.Size(84, 34)
 $form.Controls.Add($script:StopButton)
 
 $quitButton = New-Object Windows.Forms.Button
 $quitButton.Text = "Quit"
-$quitButton.Location = New-Object Drawing.Point(466, 148)
+$quitButton.Location = New-Object Drawing.Point(466, 292)
 $quitButton.Size = New-Object Drawing.Size(76, 34)
 $form.Controls.Add($quitButton)
 
 $script:LogBox = New-Object Windows.Forms.TextBox
-$script:LogBox.Location = New-Object Drawing.Point(24, 200)
-$script:LogBox.Size = New-Object Drawing.Size(520, 150)
+$script:LogBox.Location = New-Object Drawing.Point(24, 346)
+$script:LogBox.Size = New-Object Drawing.Size(626, 170)
 $script:LogBox.Multiline = $true
 $script:LogBox.ReadOnly = $true
 $script:LogBox.ScrollBars = "Vertical"
 $script:LogBox.Anchor = "Top,Bottom,Left,Right"
 $form.Controls.Add($script:LogBox)
 
-$script:InstallButton.Add_Click({ Install-Start-Connect })
-$script:StartButton.Add_Click({ Install-Start-Connect })
+$browseButton.Add_Click({
+    $dialog = New-Object Windows.Forms.FolderBrowserDialog
+    $dialog.SelectedPath = $script:InstallDirText.Text
+    if ($dialog.ShowDialog() -eq "OK") {
+        $script:InstallDirText.Text = $dialog.SelectedPath
+    }
+})
+$script:InstallButton.Add_Click({ Apply-UiSettings; Install-Start-Connect })
+$script:StartButton.Add_Click({ Apply-UiSettings; Install-Start-Connect })
 $script:ViewerButton.Add_Click({ if ($script:CurrentIp) { Open-Viewer $script:CurrentIp } })
 $script:StopButton.Add_Click({ Stop-EzGentoo })
 $quitButton.Add_Click({ $form.Close() })
+
+if ($AutoRun) {
+    $form.Add_Shown({ Apply-UiSettings; Install-Start-Connect })
+}
 
 [void]$form.ShowDialog()

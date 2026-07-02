@@ -1,4 +1,8 @@
 # Local VM/image artifacts
+dist/
+bin/
+obj/
+*.exe
 *.iso
 *.qcow2
 *.vhd
@@ -26,3 +30,6 @@ www/
 Thumbs.db
 Desktop.ini
 *.ps1xml
+
+!src/**/*.cs
+!src/**/*.csproj
