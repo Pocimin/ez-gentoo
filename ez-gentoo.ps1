@@ -1,6 +1,6 @@
 param(
     [string]$VmName = "EzGentoo",
-    [string]$ImageUrl = "https://github.com/YOURNAME/ez-gentoo/releases/latest/download/ez-gentoo-base.vhdx",
+    [string]$ImageUrl = "https://github.com/Pocimin/ez-gentoo/releases/latest/download/ez-gentoo-base.vhdx",
     [int]$MemoryGB = 4,
     [int]$CpuCount = 4,
     [int]$VncDisplay = 1,
@@ -130,9 +130,6 @@ function Ensure-BaseImage {
     if ($choice -eq "Cancel") { throw "Install cancelled." }
 
     if ($choice -eq "Yes") {
-        if ($ImageUrl -like "*YOURNAME*") {
-            throw "Edit ImageUrl in ez-gentoo.ps1 after publishing the GitHub Release asset."
-        }
         Write-AppLog "Downloading $ImageUrl."
         Invoke-WebRequest -Uri $ImageUrl -OutFile $ImagePath
         return
