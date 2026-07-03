@@ -26,8 +26,8 @@ foreach ($script in $scripts) {
     Write-Host "OK $script"
 }
 
-Write-Host "All checks passed."
-
-if (Test-Path "src/EzGentoo.Bootstrapper/EzGentoo.Bootstrapper.csproj") {
-    dotnet build "src/EzGentoo.Bootstrapper/EzGentoo.Bootstrapper.csproj" -c Release --nologo
+if (-not (Test-Path "src/EzGentoo.Native/main.cpp")) {
+    throw "Missing native app source."
 }
+
+Write-Host "All checks passed."

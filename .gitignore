@@ -2,7 +2,11 @@
 dist/
 bin/
 obj/
+external/
 *.exe
+*.obj
+*.pdb
+*.ilk
 *.iso
 *.qcow2
 *.vhd

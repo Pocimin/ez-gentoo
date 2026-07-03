@@ -1,10 +1,14 @@
 # ez gentoo
 
-Gentoo in a VM, without pretending your first Linux night needs to be a sacred trial.
+Gentoo for larpers.
 
-`ez gentoo` is a Windows app for people who want to open a real Gentoo desktop, run Portage, post the `neofetch`, break a few things, and learn by messing around. The manual install can come later. This is the front door.
+This is for the person who wants to click one button, boot a real Gentoo desktop in a VM, run `neofetch`, poke Portage with a stick, and feel like a Linux wizard for the evening.
 
-## What You Download
+No shame. That is a valid spiritual calling.
+
+The normal Gentoo install is cool, but it is also a whole side quest. `ez gentoo` is the lazy path into the playground.
+
+## Download
 
 Grab `ez-gentoo-windows-x64.zip` from Releases, unzip it, and run:
 
@@ -12,53 +16,56 @@ Grab `ez-gentoo-windows-x64.zip` from Releases, unzip it, and run:
 EzGentooInstaller.exe
 ```
 
-There is also:
+After it is installed, use:
 
 ```text
 EzGentooLauncher.exe
 ```
 
-Use the installer for first setup. Use the launcher after that.
-
 ## What The App Does
 
-- asks for admin because Hyper-V requires it
-- downloads or imports a Gentoo VM image
-- lets you choose VM name, install folder, RAM, CPU count, and disk size
-- creates a Hyper-V VM
-- disables Secure Boot for the VM
-- starts Gentoo
-- finds the VM's changing Hyper-V IP automatically
-- waits until the desktop is actually reachable
-- opens TigerVNC fullscreen
+The app is a native C++ Windows app with Dear ImGui for the UI.
 
-No guessing IPs. No typing random commands into PowerShell because a tutorial said so.
+It can:
 
-## Requirements
+- ask for admin on launch
+- pick where the VM lives
+- choose RAM, CPU cores, and disk size
+- download or import a Gentoo VM image
+- create the Hyper-V VM
+- disable Secure Boot for that VM
+- start Gentoo
+- find the VM's changing Hyper-V IP automatically
+- wait for VNC instead of opening too early and exploding
+- launch the Gentoo desktop fullscreen
+
+Basically: less ritual, more desktop.
+
+## What You Need
 
 - Windows 10/11 Pro, Enterprise, or Education
 - Hyper-V enabled
 - virtualization enabled in BIOS/UEFI
-- internet connection for first install
 - TigerVNC Viewer
+- an internet connection for first install
 
-The app tries to install TigerVNC with `winget` if it is missing.
+If TigerVNC is missing, the app tries to install it with `winget`.
 
-## The Missing Artifact
+## The One Big Missing Piece
 
-The code is ready for a one-click flow, but a public install also needs this release asset:
+The app is ready. The public base image still has to be uploaded:
 
 ```text
 ez-gentoo-base.vhdx
 ```
 
-That file is the prepared Gentoo desktop image. It is not committed to git, because VM images are huge and usually contain local secrets if you are careless.
+That file is the prepared Gentoo desktop disk. It does **not** belong in git, and we should not upload a personal VM disk with passwords, shell history, SSH junk, or whatever else is lying around in it.
 
-To ship a public build, sanitize a base VM, export it, then upload `ez-gentoo-base.vhdx` to a GitHub Release.
+Make a clean image, upload it to Releases, and then the installer becomes the real one-click thing.
 
-## Build The App
+## Build
 
-Requires .NET 8 SDK:
+Needs Visual Studio with C++ build tools:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\build-exe.ps1
@@ -72,7 +79,9 @@ dist/ez-gentoo-windows-x64/EzGentooLauncher.exe
 dist/ez-gentoo-windows-x64.zip
 ```
 
-## Make A Release Image
+The build script fetches Dear ImGui into `external/imgui`.
+
+## Make The Gentoo Image
 
 After preparing a clean VM:
 
@@ -80,9 +89,9 @@ After preparing a clean VM:
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\export-current-vm.ps1 -VmName GentooReady
 ```
 
-Upload the exported `ez-gentoo-base.vhdx` to Releases.
+Upload the exported `ez-gentoo-base.vhdx` to a GitHub Release.
 
-## For The Search Box
+## Search Bait, But Honest
 
-Gentoo VM installer, easy Gentoo installer, one-click Gentoo VM, Hyper-V Gentoo, beginner Gentoo Linux, Gentoo XFCE desktop, TigerVNC Gentoo launcher, install Gentoo in a virtual machine.
+Gentoo VM installer, easy Gentoo installer, one-click Gentoo VM, Hyper-V Gentoo, beginner Gentoo Linux, Gentoo XFCE desktop, TigerVNC Gentoo launcher, install Gentoo in a virtual machine, Linux larp setup.
 

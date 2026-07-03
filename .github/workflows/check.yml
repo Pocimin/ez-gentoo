@@ -9,7 +9,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse PowerShell scripts
+      - name: Check scripts
         shell: pwsh
         run: ./scripts/check.ps1
-
+      - name: Build native app
+        shell: pwsh
+        run: ./scripts/build-exe.ps1
