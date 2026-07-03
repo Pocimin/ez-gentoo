@@ -1,82 +1,62 @@
 # ez gentoo
 
-One-click Gentoo VM installer and launcher for Windows Hyper-V.
+Gentoo in a VM, without pretending your first Linux night needs to be a sacred trial.
 
-`ez gentoo` is for people who want to play with Gentoo, flex `neofetch`, open a real Linux desktop, and learn without doing the whole manual install ritual on day one.
+`ez gentoo` is a Windows app for people who want to open a real Gentoo desktop, run Portage, post the `neofetch`, break a few things, and learn by messing around. The manual install can come later. This is the front door.
 
-## What It Does
+## What You Download
 
-- creates a Hyper-V VM
-- imports a prepared Gentoo desktop image
-- starts the VM
-- finds the VM's changing Hyper-V IP automatically
-- waits for VNC
-- opens TigerVNC fullscreen
-- gives you a small Windows launcher UI
-
-## Quick Start
-
-Download the latest `ez-gentoo-windows-x64.zip` from Releases, unzip it, then run:
+Grab `ez-gentoo-windows-x64.zip` from Releases, unzip it, and run:
 
 ```text
 EzGentooInstaller.exe
 ```
 
-The installer opens a small UI where you can choose:
+There is also:
 
-- VM name
-- install folder
-- RAM
-- CPU count
-- virtual disk size
-- base image URL
-
-You can also run PowerShell directly:
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\ez-gentoo.ps1
+```text
+EzGentooLauncher.exe
 ```
 
-Then click **Install / Start**.
+Use the installer for first setup. Use the launcher after that.
 
-The launcher can use either:
+## What The App Does
 
-- a prepared `ez-gentoo-base.vhdx` release asset
-- a local `.vhdx` file
-- a local `.qcow2` file, converted with `qemu-img`
+- asks for admin because Hyper-V requires it
+- downloads or imports a Gentoo VM image
+- lets you choose VM name, install folder, RAM, CPU count, and disk size
+- creates a Hyper-V VM
+- disables Secure Boot for the VM
+- starts Gentoo
+- finds the VM's changing Hyper-V IP automatically
+- waits until the desktop is actually reachable
+- opens TigerVNC fullscreen
+
+No guessing IPs. No typing random commands into PowerShell because a tutorial said so.
 
 ## Requirements
 
 - Windows 10/11 Pro, Enterprise, or Education
 - Hyper-V enabled
 - virtualization enabled in BIOS/UEFI
-- PowerShell 5+
+- internet connection for first install
 - TigerVNC Viewer
-- `qemu-img` if installing from `.qcow2`
 
-The launcher can install TigerVNC and qemu-img through `winget` when available.
+The app tries to install TigerVNC with `winget` if it is missing.
 
-## Why A Prepared Image?
+## The Missing Artifact
 
-Gentoo is source-based. A fully manual desktop install can take hours on a small laptop. This project ships the fun path: a prepared Gentoo desktop image plus a launcher. You still get real Gentoo, Portage, XFCE, terminal, Firefox, and the ability to compile stuff when you want.
-
-The VM image is intentionally not committed to git. Put it on GitHub Releases as:
+The code is ready for a one-click flow, but a public install also needs this release asset:
 
 ```text
 ez-gentoo-base.vhdx
 ```
 
-## Making A Release Image
+That file is the prepared Gentoo desktop image. It is not committed to git, because VM images are huge and usually contain local secrets if you are careless.
 
-After preparing a VM named `GentooReady`, run:
+To ship a public build, sanitize a base VM, export it, then upload `ez-gentoo-base.vhdx` to a GitHub Release.
 
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\export-current-vm.ps1 -VmName GentooReady
-```
-
-Upload the generated `.zip` or `.vhdx` from `dist/` to a GitHub Release.
-
-## Building The EXEs
+## Build The App
 
 Requires .NET 8 SDK:
 
@@ -84,7 +64,7 @@ Requires .NET 8 SDK:
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\build-exe.ps1
 ```
 
-This creates:
+Output:
 
 ```text
 dist/ez-gentoo-windows-x64/EzGentooInstaller.exe
@@ -92,23 +72,17 @@ dist/ez-gentoo-windows-x64/EzGentooLauncher.exe
 dist/ez-gentoo-windows-x64.zip
 ```
 
-## Guest Defaults
+## Make A Release Image
 
-The prepared image should provide:
+After preparing a clean VM:
 
-- user: `reina` or your preferred demo user
-- VNC display: `:1`
-- VNC TCP port: `5901`
-- XFCE session
-- OpenSSH server
-- TigerVNC server
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\export-current-vm.ps1 -VmName GentooReady
+```
 
-See `scripts/prepare-gentoo-guest.sh` for the guest-side setup.
+Upload the exported `ez-gentoo-base.vhdx` to Releases.
 
-## Keywords
+## For The Search Box
 
-Gentoo VM installer, easy Gentoo installer, one-click Gentoo VM, Hyper-V Gentoo, Windows Gentoo VM, beginner Gentoo Linux, Gentoo XFCE desktop, TigerVNC Gentoo launcher, install Gentoo in virtual machine.
+Gentoo VM installer, easy Gentoo installer, one-click Gentoo VM, Hyper-V Gentoo, beginner Gentoo Linux, Gentoo XFCE desktop, TigerVNC Gentoo launcher, install Gentoo in a virtual machine.
 
-## Status
-
-Early but usable. Windows + Hyper-V is the first supported target.
