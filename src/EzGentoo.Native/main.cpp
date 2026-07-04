@@ -157,6 +157,24 @@ static bool StartsWithHttp(const std::wstring& s)
     return s.rfind(L"http://", 0) == 0 || s.rfind(L"https://", 0) == 0;
 }
 
+static bool VmExists(const std::wstring& vm)
+{
+    auto r = PowerShell(L"if (Get-VM -Name " + PsQuote(vm) + L" -ErrorAction SilentlyContinue) { 'yes' }");
+    return r.output.find("yes") != std::string::npos;
+}
+
+static std::wstring FindDefaultVmName()
+{
+    auto r = PowerShell(
+        L"$vms = Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'gentoo' } | "
+        L"Sort-Object @{ Expression = { if ($_.Name -eq 'GentooReady') { 0 } elseif ($_.Name -eq 'Gentoo') { 1 } else { 2 } } }, Name | "
+        L"Select-Object -First 1 -ExpandProperty Name; $vms");
+    std::string s = r.output;
+    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+    s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+    return s.empty() ? L"EzGentoo" : Utf8ToWide(s);
+}
+
 struct AppState
 {
     HWND hwnd = nullptr;
@@ -445,10 +463,17 @@ static void InstallStartConnect(Settings s)
     {
         SetStatus("Checking Windows bits...", 5);
         EnsureTooling();
-        SetStatus("Preparing Gentoo image...", 20);
-        std::wstring image = EnsureImage(s.dir, s.image, s.disk);
-        SetStatus("Creating Hyper-V VM...", 45);
-        EnsureVm(s.vm, s.dir, image, s.ram, s.cpu);
+        if (VmExists(s.vm))
+        {
+            SetStatus("Using existing VM " + WideToUtf8(s.vm) + "...", 45);
+        }
+        else
+        {
+            SetStatus("Preparing Gentoo image...", 20);
+            std::wstring image = EnsureImage(s.dir, s.image, s.disk);
+            SetStatus("Creating Hyper-V VM...", 45);
+            EnsureVm(s.vm, s.dir, image, s.ram, s.cpu);
+        }
         SetStatus("Starting Gentoo...", 60);
         StartVm(s.vm);
         SetStatus("Finding the VM on Hyper-V's chaos network...", 75);
@@ -542,7 +567,7 @@ static void CreateUi(HWND hwnd)
     Add(hwnd, L"STATIC", L"Gentoo for larpers. Configure it, press install, go touch grass for a bit.", 0, 0, 26, 58, 760, 24);
 
     AddLabel(hwnd, L"VM name", 26, 102, 140, 22);
-    g_app.vmName = Add(hwnd, L"EDIT", L"EzGentoo", WS_BORDER | ES_AUTOHSCROLL, IdVmName, 170, 98, 260, 28);
+    g_app.vmName = Add(hwnd, L"EDIT", FindDefaultVmName().c_str(), WS_BORDER | ES_AUTOHSCROLL, IdVmName, 170, 98, 260, 28);
 
     AddLabel(hwnd, L"Install folder", 26, 140, 140, 22);
     g_app.installDir = Add(hwnd, L"EDIT", DefaultInstallDir().c_str(), WS_BORDER | ES_AUTOHSCROLL, IdInstallDir, 170, 136, 520, 28);
