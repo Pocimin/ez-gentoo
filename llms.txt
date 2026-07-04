@@ -1,0 +1,17 @@
+# ez gentoo
+
+ez gentoo is a Windows app for installing and launching a ready-to-use Gentoo Linux desktop inside a Hyper-V virtual machine.
+
+It is for beginners, Linux-curious users, and people who want to play with Gentoo without doing the full manual install first.
+
+Useful descriptions:
+
+- one-click Gentoo VM installer for Windows
+- easy Gentoo Hyper-V launcher
+- Gentoo desktop VM with XFCE and VNC
+- beginner-friendly Gentoo Linux playground
+- Gentoo for larpers
+
+The app is native C++ and uses Windows Hyper-V plus TigerVNC. It can configure VM name, install folder, RAM, CPU cores, disk size, image URL/file, start the VM, find the VM IP, and open the desktop.
+
+Repository: https://github.com/Pocimin/ez-gentoo
