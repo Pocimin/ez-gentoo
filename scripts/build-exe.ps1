@@ -4,6 +4,7 @@ $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $imgui = Join-Path $repo "external\imgui"
 $build = Join-Path $repo "dist\build"
 $app = Join-Path $repo "dist\ez-gentoo-windows-x64"
+$manifest = Join-Path $repo "src\EzGentoo.Native\EzGentoo.manifest"
 
 if (-not (Test-Path $imgui)) {
     New-Item -ItemType Directory -Force -Path (Join-Path $repo "external") | Out-Null
@@ -33,10 +34,12 @@ $sources = @(
 ) -join " "
 
 $compile = "/nologo /std:c++20 /EHsc /O2 /DUNICODE /D_UNICODE /Fo`"$build\\`" /Fd`"$build\\ezgentoo.pdb`" /I`"$imgui`" /I`"$imgui\backends`" $sources"
-$link = "/link /SUBSYSTEM:WINDOWS /MANIFESTUAC:`"level='requireAdministrator' uiAccess='false'`" d3d11.lib dxgi.lib dwmapi.lib wininet.lib crypt32.lib ws2_32.lib shell32.lib ole32.lib comdlg32.lib user32.lib gdi32.lib advapi32.lib"
+$link = "/link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:`"$manifest`" d3d11.lib dxgi.lib dwmapi.lib wininet.lib crypt32.lib ws2_32.lib shell32.lib ole32.lib comdlg32.lib user32.lib gdi32.lib advapi32.lib"
 
 cmd /c "`"$vcvars`" && cl $compile /Fe:`"$app\EzGentooInstaller.exe`" $link"
+if ($LASTEXITCODE -ne 0) { throw "EzGentooInstaller.exe build failed." }
 cmd /c "`"$vcvars`" && cl $compile /Fe:`"$app\EzGentooLauncher.exe`" $link"
+if ($LASTEXITCODE -ne 0) { throw "EzGentooLauncher.exe build failed." }
 
 Copy-Item (Join-Path $repo "README.md") $app
 Copy-Item (Join-Path $repo "CHANGELOG.md") $app
