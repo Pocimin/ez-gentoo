@@ -50,13 +50,32 @@ if TigerVNC is missing, ez gentoo tries to install it with `winget`.
 
 ## important
 
-the app is real, but the public one-click experience needs one more file in Releases:
+the base image is hosted here:
 
 ```text
-ez-gentoo-base.vhdx
+http://136.243.8.214:8088/ez-gentoo-base.vhdx
 ```
 
-that is the clean Gentoo desktop disk image. do not upload your personal VM disk unless it has been cleaned first. passwords, shell history, SSH keys, browser junk, all of that has to go.
+sha256:
+
+```text
+56983a9462cc248d0778040c2666486df1ebba59ea1d81fe2f985dcd2e2f08fc
+```
+
+default desktop user:
+
+```text
+user: reina
+password: LarpGentoo42!
+```
+
+if TigerVNC asks for a VNC password, use:
+
+```text
+gentoo42
+```
+
+root ssh is disabled in the public image. this is a larp box, not a production server.
 
 ## build
 
@@ -74,15 +93,15 @@ dist/ez-gentoo-windows-x64/EzGentooLauncher.exe
 dist/ez-gentoo-windows-x64.zip
 ```
 
-## make a clean image
+## publish a clean image
 
-after preparing a clean VM:
+after preparing a clean VM, run this as Administrator:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\export-current-vm.ps1 -VmName GentooReady
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\publish-base-image.ps1
 ```
 
-upload the exported `ez-gentoo-base.vhdx` to a GitHub Release.
+that script merges the VM checkpoint chain, sanitizes a clone, and uploads the VHDX to the image server.
 
 ## search words, but honest
 

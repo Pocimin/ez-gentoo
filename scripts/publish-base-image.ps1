@@ -142,7 +142,7 @@ Say "Local sha256: $hash"
 
 Say "Uploading image to VPS."
 scp -i $key -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 $image "${vps}:$remotePartial"
-ssh -i $key -o BatchMode=yes $vps "sha256sum $remotePartial > $remoteSha.tmp && mv $remotePartial $remoteFinal && sed 's/ez-gentoo-base.vhdx.partial/ez-gentoo-base.vhdx/' $remoteSha.tmp > $remoteSha && rm -f $remoteSha.tmp && ls -lh $remoteFinal $remoteSha && cat $remoteSha"
+ssh -i $key -o BatchMode=yes $vps "cd /srv/ez-gentoo && sha256sum ez-gentoo-base.vhdx.partial > ez-gentoo-base.vhdx.sha256.tmp && mv ez-gentoo-base.vhdx.partial ez-gentoo-base.vhdx && sed 's/ez-gentoo-base.vhdx.partial/ez-gentoo-base.vhdx/' ez-gentoo-base.vhdx.sha256.tmp > ez-gentoo-base.vhdx.sha256 && rm -f ez-gentoo-base.vhdx.sha256.tmp && ls -lh ez-gentoo-base.vhdx ez-gentoo-base.vhdx.sha256 && cat ez-gentoo-base.vhdx.sha256"
 
 Say "Done: http://136.243.8.214:8088/ez-gentoo-base.vhdx"
 Stop-Transcript | Out-Null

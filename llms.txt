@@ -14,4 +14,6 @@ Useful descriptions:
 
 The app is native C++ and uses Windows Hyper-V plus TigerVNC. It can configure VM name, install folder, RAM, CPU cores, disk size, image URL/file, start the VM, find the VM IP, and open the desktop.
 
+Default public base image: http://136.243.8.214:8088/ez-gentoo-base.vhdx
+
 Repository: https://github.com/Pocimin/ez-gentoo
