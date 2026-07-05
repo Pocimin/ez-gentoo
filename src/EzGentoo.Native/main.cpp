@@ -1,6 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -8,44 +7,45 @@
 #include <wincrypt.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <d3d11.h>
+#include <tchar.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "imgui.h"
+#include "imgui_impl_dx11.h"
+#include "imgui_impl_win32.h"
+
+#pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "comdlg32.lib")
-#pragma comment(lib, "comctl32.lib")
 
-static constexpr UINT WM_APP_LOG = WM_APP + 1;
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
-enum ControlId
-{
-    IdVmName = 100,
-    IdInstallDir,
-    IdImageSource,
-    IdRam,
-    IdCpu,
-    IdDisk,
-    IdBrowse,
-    IdPickImage,
-    IdInstall,
-    IdConnect,
-    IdStop,
-    IdProgress,
-    IdStatus,
-    IdLog
-};
+static ID3D11Device* g_pd3dDevice = nullptr;
+static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
+static IDXGISwapChain* g_pSwapChain = nullptr;
+static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
+static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+
+static bool CreateDeviceD3D(HWND hWnd);
+static void CleanupDeviceD3D();
+static void CreateRenderTarget();
+static void CleanupRenderTarget();
+static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static std::wstring Utf8ToWide(const std::string& s)
 {
@@ -177,89 +177,49 @@ static std::wstring FindDefaultVmName()
 
 struct AppState
 {
-    HWND hwnd = nullptr;
-    HWND vmName = nullptr;
-    HWND installDir = nullptr;
-    HWND imageSource = nullptr;
-    HWND ram = nullptr;
-    HWND cpu = nullptr;
-    HWND disk = nullptr;
-    HWND status = nullptr;
-    HWND progress = nullptr;
-    HWND log = nullptr;
-    std::mutex mutex;
-    bool busy = false;
+    char vmName[128] = "EzGentoo";
+    char installDir[512]{};
+    char imageSource[1024] = "http://136.243.8.214:8088/ez-gentoo-base.vhdx";
+    int ramGb = 4;
+    int cpuCount = 4;
+    int diskGb = 40;
     int vncDisplay = 1;
     int vncPort = 5901;
+    int progress = 0;
+    bool busy = false;
+    bool autoRun = false;
+    std::string status = "Ready";
     std::string currentIp;
+    std::vector<std::string> log;
+    std::mutex mutex;
 };
 
-static AppState g_app;
-static HFONT g_titleFont = nullptr;
-static HFONT g_uiFont = nullptr;
-
-static std::wstring GetText(HWND hwnd)
-{
-    int len = GetWindowTextLengthW(hwnd);
-    std::wstring out(len + 1, 0);
-    GetWindowTextW(hwnd, out.data(), (int)out.size());
-    out.resize(len);
-    return out;
-}
-
-static int GetInt(HWND hwnd, int fallback)
-{
-    BOOL ok = FALSE;
-    int value = GetDlgItemInt(GetParent(hwnd), GetDlgCtrlID(hwnd), &ok, FALSE);
-    return ok ? value : fallback;
-}
-
-static void SetBusy(bool busy)
-{
-    g_app.busy = busy;
-    EnableWindow(g_app.vmName, !busy);
-    EnableWindow(g_app.installDir, !busy);
-    EnableWindow(g_app.imageSource, !busy);
-    EnableWindow(g_app.ram, !busy);
-    EnableWindow(g_app.cpu, !busy);
-    EnableWindow(g_app.disk, !busy);
-    EnableWindow(GetDlgItem(g_app.hwnd, IdBrowse), !busy);
-    EnableWindow(GetDlgItem(g_app.hwnd, IdPickImage), !busy);
-    EnableWindow(GetDlgItem(g_app.hwnd, IdInstall), !busy);
-    EnableWindow(GetDlgItem(g_app.hwnd, IdConnect), !busy);
-    EnableWindow(GetDlgItem(g_app.hwnd, IdStop), !busy);
-}
-
-static void AddLogLine(const std::wstring& line)
-{
-    SendMessageW(g_app.log, LB_ADDSTRING, 0, (LPARAM)line.c_str());
-    int count = (int)SendMessageW(g_app.log, LB_GETCOUNT, 0, 0);
-    if (count > 500) SendMessageW(g_app.log, LB_DELETESTRING, 0, 0);
-    SendMessageW(g_app.log, LB_SETTOPINDEX, max(0, count - 1), 0);
-}
-
-static void Log(const std::string& msg)
+static void Log(AppState& app, const std::string& msg)
 {
     SYSTEMTIME t;
     GetLocalTime(&t);
     char line[1400];
     snprintf(line, sizeof(line), "%02d:%02d:%02d  %s", t.wHour, t.wMinute, t.wSecond, msg.c_str());
-    auto* copy = new std::wstring(Utf8ToWide(line));
-    PostMessageW(g_app.hwnd, WM_APP_LOG, 0, (LPARAM)copy);
+    std::lock_guard<std::mutex> lock(app.mutex);
+    app.log.emplace_back(line);
+    if (app.log.size() > 500) app.log.erase(app.log.begin());
 }
 
-static void SetStatus(const std::string& msg, int progress)
+static void SetStatus(AppState& app, const std::string& msg, int progress)
 {
-    SetWindowTextW(g_app.status, Utf8ToWide(msg).c_str());
-    SendMessageW(g_app.progress, PBM_SETPOS, std::clamp(progress, 0, 100), 0);
-    Log(msg);
+    {
+        std::lock_guard<std::mutex> lock(app.mutex);
+        app.status = msg;
+        app.progress = std::clamp(progress, 0, 100);
+    }
+    Log(app, msg);
 }
 
-static void RequireOk(const CommandResult& r, const std::string& what)
+static void RequireOk(AppState& app, const CommandResult& r, const std::string& what)
 {
     if (r.code != 0)
     {
-        Log(r.output);
+        Log(app, r.output);
         throw std::runtime_error(what + " failed");
     }
 }
@@ -273,19 +233,21 @@ static std::wstring FindQemuImg()
     return Utf8ToWide(s);
 }
 
-static void EnsureTooling()
+static void EnsureTooling(AppState& app)
 {
-    RequireOk(PowerShell(L"if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) { throw 'Hyper-V PowerShell tools are missing. Enable Hyper-V first.' }"), "Hyper-V check");
+    RequireOk(app, PowerShell(L"if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) { throw 'Hyper-V PowerShell tools are missing. Enable Hyper-V first.' }"), "Hyper-V check");
 
     if (!FileExists(L"C:\\Program Files\\TigerVNC\\vncviewer.exe"))
     {
-        Log("TigerVNC missing. Asking winget to install it.");
-        RequireOk(RunHidden(L"winget.exe", L"install --id TigerVNC.TigerVNC --exact --accept-source-agreements --accept-package-agreements"), "TigerVNC install");
+        Log(app, "TigerVNC missing. Asking winget to install it.");
+        RequireOk(app, RunHidden(L"winget.exe", L"install --id TigerVNC.TigerVNC --exact --accept-source-agreements --accept-package-agreements"), "TigerVNC install");
     }
 }
 
-static std::wstring EnsureImage(const std::wstring& installDir, const std::wstring& source, int diskGb)
+static std::wstring EnsureImage(AppState& app)
 {
+    std::wstring installDir = Utf8ToWide(app.installDir);
+    std::wstring source = Utf8ToWide(app.imageSource);
     std::filesystem::create_directories(installDir);
     std::wstring imagePath = installDir + L"\\ez-gentoo-base.vhdx";
 
@@ -293,13 +255,13 @@ static std::wstring EnsureImage(const std::wstring& installDir, const std::wstri
     {
         if (StartsWithHttp(source))
         {
-            Log("Downloading base image. This is the long part.");
+            Log(app, "Downloading base image. This is the long part.");
             HRESULT hr = URLDownloadToFileW(nullptr, source.c_str(), imagePath.c_str(), 0, nullptr);
             if (FAILED(hr)) throw std::runtime_error("download failed");
         }
         else if (FileExists(source) && source.size() >= 5 && source.substr(source.size() - 5) == L".vhdx")
         {
-            Log("Copying local VHDX.");
+            Log(app, "Copying local VHDX.");
             std::filesystem::copy_file(source, imagePath, std::filesystem::copy_options::overwrite_existing);
         }
         else if (FileExists(source) && source.size() >= 6 && source.substr(source.size() - 6) == L".qcow2")
@@ -307,13 +269,13 @@ static std::wstring EnsureImage(const std::wstring& installDir, const std::wstri
             std::wstring qemu = FindQemuImg();
             if (qemu.empty())
             {
-                Log("qemu-img missing. Asking winget to install it.");
-                RequireOk(RunHidden(L"winget.exe", L"install --id cloudbase.qemu-img --exact --accept-source-agreements --accept-package-agreements"), "qemu-img install");
+                Log(app, "qemu-img missing. Asking winget to install it.");
+                RequireOk(app, RunHidden(L"winget.exe", L"install --id cloudbase.qemu-img --exact --accept-source-agreements --accept-package-agreements"), "qemu-img install");
                 qemu = FindQemuImg();
             }
             if (qemu.empty()) throw std::runtime_error("qemu-img not found");
-            Log("Converting QCOW2 to VHDX.");
-            RequireOk(RunHidden(qemu, L"convert -p -O vhdx \"" + source + L"\" \"" + imagePath + L"\""), "qemu-img convert");
+            Log(app, "Converting QCOW2 to VHDX.");
+            RequireOk(app, RunHidden(qemu, L"convert -p -O vhdx \"" + source + L"\" \"" + imagePath + L"\""), "qemu-img convert");
         }
         else
         {
@@ -322,23 +284,24 @@ static std::wstring EnsureImage(const std::wstring& installDir, const std::wstri
     }
     else
     {
-        Log("Base image already exists.");
+        Log(app, "Base image already exists.");
     }
 
-    long long targetBytes = (long long)diskGb * 1024LL * 1024LL * 1024LL;
+    long long targetBytes = (long long)app.diskGb * 1024LL * 1024LL * 1024LL;
     std::wstringstream resize;
     resize << L"$vhd = Get-VHD -Path " << PsQuote(imagePath) << L"; "
            << L"if ($vhd.Size -lt " << targetBytes << L") { Resize-VHD -Path "
            << PsQuote(imagePath) << L" -SizeBytes " << targetBytes << L" }";
-    RequireOk(PowerShell(resize.str()), "disk resize");
+    RequireOk(app, PowerShell(resize.str()), "disk resize");
     return imagePath;
 }
 
-static void EnsureVm(const std::wstring& vm, const std::wstring& installDir, const std::wstring& imagePath, int ramGb, int cpuCount)
+static void EnsureVm(AppState& app, const std::wstring& imagePath)
 {
-    std::wstring vmDir = installDir + L"\\vm";
+    std::wstring vm = Utf8ToWide(app.vmName);
+    std::wstring vmDir = Utf8ToWide(app.installDir) + L"\\vm";
     std::filesystem::create_directories(vmDir);
-    long long memoryBytes = (long long)ramGb * 1024LL * 1024LL * 1024LL;
+    long long memoryBytes = (long long)app.ramGb * 1024LL * 1024LL * 1024LL;
     long long minBytes = 2LL * 1024LL * 1024LL * 1024LL;
 
     std::wstringstream ps;
@@ -350,23 +313,25 @@ static void EnsureVm(const std::wstring& vm, const std::wstring& installDir, con
        << L" -Path " << PsQuote(vmDir)
        << L" -SwitchName 'Default Switch' | Out-Null; "
        << L"Set-VMFirmware -VMName " << PsQuote(vm) << L" -EnableSecureBoot Off }; "
-       << L"Set-VMProcessor -VMName " << PsQuote(vm) << L" -Count " << cpuCount << L"; "
+       << L"Set-VMProcessor -VMName " << PsQuote(vm) << L" -Count " << app.cpuCount << L"; "
        << L"Set-VMMemory -VMName " << PsQuote(vm)
        << L" -DynamicMemoryEnabled $true -MinimumBytes " << minBytes
        << L" -StartupBytes " << memoryBytes
        << L" -MaximumBytes " << memoryBytes;
 
-    RequireOk(PowerShell(ps.str()), "VM create/configure");
+    RequireOk(app, PowerShell(ps.str()), "VM create/configure");
 }
 
-static void StartVm(const std::wstring& vm)
+static void StartVm(AppState& app)
 {
+    std::wstring vm = Utf8ToWide(app.vmName);
     std::wstring ps = L"$vm = Get-VM -Name " + PsQuote(vm) + L"; if ($vm.State -ne 'Running') { Start-VM -Name " + PsQuote(vm) + L" }";
-    RequireOk(PowerShell(ps), "VM start");
+    RequireOk(app, PowerShell(ps), "VM start");
 }
 
-static std::vector<std::string> CandidateIps(const std::wstring& vm)
+static std::vector<std::string> CandidateIps(AppState& app)
 {
+    std::wstring vm = Utf8ToWide(app.vmName);
     std::wstring ps =
         L"$adapter = Get-VMNetworkAdapter -VMName " + PsQuote(vm) + L"; "
         L"$mac = (($adapter.MacAddress -replace '[^0-9A-Fa-f]', '').ToUpper() -replace '(.{2})(?!$)', '$1-'); "
@@ -410,19 +375,19 @@ static bool TestTcp(const std::string& ip, int port)
     return ok > 0;
 }
 
-static std::string WaitForVnc(const std::wstring& vm)
+static std::string WaitForVnc(AppState& app)
 {
     std::vector<std::string> seen;
     for (int i = 0; i < 75; ++i)
     {
-        for (const auto& ip : CandidateIps(vm))
+        for (const auto& ip : CandidateIps(app))
         {
             if (std::find(seen.begin(), seen.end(), ip) == seen.end())
             {
                 seen.push_back(ip);
-                Log("Found candidate IP " + ip);
+                Log(app, "Found candidate IP " + ip);
             }
-            if (TestTcp(ip, g_app.vncPort)) return ip;
+            if (TestTcp(ip, app.vncPort)) return ip;
         }
         Sleep(2000);
     }
@@ -435,92 +400,70 @@ static void OpenVnc(const std::string& ip, int display)
     ShellExecuteW(nullptr, L"open", L"C:\\Program Files\\TigerVNC\\vncviewer.exe", (L"-FullScreen " + target).c_str(), nullptr, SW_SHOWNORMAL);
 }
 
-struct Settings
-{
-    std::wstring vm;
-    std::wstring dir;
-    std::wstring image;
-    int ram = 4;
-    int cpu = 4;
-    int disk = 40;
-};
-
-static Settings ReadSettings()
-{
-    Settings s;
-    s.vm = GetText(g_app.vmName);
-    s.dir = GetText(g_app.installDir);
-    s.image = GetText(g_app.imageSource);
-    s.ram = std::clamp(GetInt(g_app.ram, 4), 2, 64);
-    s.cpu = std::clamp(GetInt(g_app.cpu, 4), 1, 32);
-    s.disk = std::clamp(GetInt(g_app.disk, 40), 20, 512);
-    return s;
-}
-
-static void InstallStartConnect(Settings s)
+static void InstallStartConnect(AppState& app)
 {
     try
     {
-        SetStatus("Checking Windows bits...", 5);
-        EnsureTooling();
-        if (VmExists(s.vm))
+        SetStatus(app, "Checking Windows bits...", 5);
+        EnsureTooling(app);
+        if (VmExists(Utf8ToWide(app.vmName)))
         {
-            SetStatus("Using existing VM " + WideToUtf8(s.vm) + "...", 45);
+            SetStatus(app, std::string("Using existing VM ") + app.vmName + "...", 45);
         }
         else
         {
-            SetStatus("Preparing Gentoo image...", 20);
-            std::wstring image = EnsureImage(s.dir, s.image, s.disk);
-            SetStatus("Creating Hyper-V VM...", 45);
-            EnsureVm(s.vm, s.dir, image, s.ram, s.cpu);
+            SetStatus(app, "Preparing Gentoo image...", 20);
+            std::wstring image = EnsureImage(app);
+            SetStatus(app, "Creating Hyper-V VM...", 45);
+            EnsureVm(app, image);
         }
-        SetStatus("Starting Gentoo...", 60);
-        StartVm(s.vm);
-        SetStatus("Finding the VM on Hyper-V's chaos network...", 75);
-        g_app.currentIp = WaitForVnc(s.vm);
-        SetStatus("Opening Gentoo desktop...", 95);
-        OpenVnc(g_app.currentIp, g_app.vncDisplay);
-        SetStatus("Done. Go larp.", 100);
+        SetStatus(app, "Starting Gentoo...", 60);
+        StartVm(app);
+        SetStatus(app, "Finding the VM on Hyper-V's chaos network...", 75);
+        app.currentIp = WaitForVnc(app);
+        SetStatus(app, "Opening Gentoo desktop...", 95);
+        OpenVnc(app.currentIp, app.vncDisplay);
+        SetStatus(app, "Done. Go larp.", 100);
     }
     catch (const std::exception& e)
     {
-        SetStatus(std::string("Failed: ") + e.what(), 0);
+        SetStatus(app, std::string("Failed: ") + e.what(), 0);
     }
-    PostMessageW(g_app.hwnd, WM_APP_LOG, 1, 0);
+    app.busy = false;
 }
 
-static void Connect(Settings s)
+static void Connect(AppState& app)
 {
     try
     {
-        SetStatus("Finding the VM...", 60);
-        g_app.currentIp = WaitForVnc(s.vm);
-        OpenVnc(g_app.currentIp, g_app.vncDisplay);
-        SetStatus("Desktop opened.", 100);
+        SetStatus(app, "Finding the VM...", 60);
+        app.currentIp = WaitForVnc(app);
+        OpenVnc(app.currentIp, app.vncDisplay);
+        SetStatus(app, "Desktop opened.", 100);
     }
     catch (const std::exception& e)
     {
-        SetStatus(std::string("Failed: ") + e.what(), 0);
+        SetStatus(app, std::string("Failed: ") + e.what(), 0);
     }
-    PostMessageW(g_app.hwnd, WM_APP_LOG, 1, 0);
+    app.busy = false;
 }
 
-static void StopVm(Settings s)
+static void StopVm(AppState& app)
 {
     try
     {
-        SetStatus("Stopping VM...", 30);
-        RequireOk(PowerShell(L"Stop-VM -Name " + PsQuote(s.vm) + L" -TurnOff -Force"), "VM stop");
-        SetStatus("VM stopped.", 0);
+        SetStatus(app, "Stopping VM...", 30);
+        RequireOk(app, PowerShell(L"Stop-VM -Name " + PsQuote(Utf8ToWide(app.vmName)) + L" -TurnOff -Force"), "VM stop");
+        SetStatus(app, "VM stopped.", 0);
     }
     catch (const std::exception& e)
     {
-        SetStatus(std::string("Failed: ") + e.what(), 0);
+        SetStatus(app, std::string("Failed: ") + e.what(), 0);
     }
-    PostMessageW(g_app.hwnd, WM_APP_LOG, 1, 0);
+    app.busy = false;
 }
 
-static void BrowseFolder()
+static void BrowseFolder(AppState& app)
 {
     BROWSEINFOW bi{};
     bi.lpszTitle = L"Choose where ez gentoo should live";
@@ -529,10 +472,10 @@ static void BrowseFolder()
     wchar_t path[MAX_PATH]{};
     SHGetPathFromIDListW(pidl, path);
     CoTaskMemFree(pidl);
-    SetWindowTextW(g_app.installDir, path);
+    strncpy_s(app.installDir, WideToUtf8(path).c_str(), sizeof(app.installDir) - 1);
 }
 
-static void PickImage()
+static void PickImage(AppState& app)
 {
     wchar_t path[MAX_PATH]{};
     OPENFILENAMEW ofn{ sizeof(ofn) };
@@ -540,121 +483,115 @@ static void PickImage()
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrFilter = L"VM images\0*.vhdx;*.qcow2\0All files\0*.*\0";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameW(&ofn)) SetWindowTextW(g_app.imageSource, path);
+    if (GetOpenFileNameW(&ofn))
+        strncpy_s(app.imageSource, WideToUtf8(path).c_str(), sizeof(app.imageSource) - 1);
 }
 
-static HWND Add(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int h)
+static void DrawButtonRow(AppState& app)
 {
-    HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent, (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
-    SendMessageW(hwnd, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-    return hwnd;
-}
-
-static void AddLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h)
-{
-    Add(parent, L"STATIC", text, 0, 0, x, y, w, h);
-}
-
-static void CreateUi(HWND hwnd)
-{
-    g_titleFont = CreateFontW(-30, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Poppins");
-    g_uiFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Poppins");
-
-    HWND title = Add(hwnd, L"STATIC", L"ez gentoo", 0, 0, 24, 18, 240, 42);
-    SendMessageW(title, WM_SETFONT, (WPARAM)g_titleFont, TRUE);
-    Add(hwnd, L"STATIC", L"Gentoo for larpers. Configure it, press install, go touch grass for a bit.", 0, 0, 26, 58, 760, 24);
-
-    AddLabel(hwnd, L"VM name", 26, 102, 140, 22);
-    g_app.vmName = Add(hwnd, L"EDIT", FindDefaultVmName().c_str(), WS_BORDER | ES_AUTOHSCROLL, IdVmName, 170, 98, 260, 28);
-
-    AddLabel(hwnd, L"Install folder", 26, 140, 140, 22);
-    g_app.installDir = Add(hwnd, L"EDIT", DefaultInstallDir().c_str(), WS_BORDER | ES_AUTOHSCROLL, IdInstallDir, 170, 136, 520, 28);
-    Add(hwnd, L"BUTTON", L"Browse", BS_PUSHBUTTON, IdBrowse, 704, 136, 110, 28);
-
-    AddLabel(hwnd, L"Image URL or file", 26, 178, 140, 22);
-    g_app.imageSource = Add(hwnd, L"EDIT", L"https://github.com/Pocimin/ez-gentoo/releases/latest/download/ez-gentoo-base.vhdx", WS_BORDER | ES_AUTOHSCROLL, IdImageSource, 170, 174, 520, 28);
-    Add(hwnd, L"BUTTON", L"Pick image", BS_PUSHBUTTON, IdPickImage, 704, 174, 110, 28);
-
-    AddLabel(hwnd, L"RAM GB", 26, 218, 80, 22);
-    g_app.ram = Add(hwnd, L"EDIT", L"4", WS_BORDER | ES_NUMBER, IdRam, 110, 214, 70, 28);
-    AddLabel(hwnd, L"CPU cores", 206, 218, 90, 22);
-    g_app.cpu = Add(hwnd, L"EDIT", L"4", WS_BORDER | ES_NUMBER, IdCpu, 302, 214, 70, 28);
-    AddLabel(hwnd, L"Disk GB", 398, 218, 80, 22);
-    g_app.disk = Add(hwnd, L"EDIT", L"40", WS_BORDER | ES_NUMBER, IdDisk, 482, 214, 70, 28);
-
-    Add(hwnd, L"BUTTON", L"Install / Start", BS_DEFPUSHBUTTON, IdInstall, 26, 268, 150, 38);
-    Add(hwnd, L"BUTTON", L"Connect", BS_PUSHBUTTON, IdConnect, 188, 268, 110, 38);
-    Add(hwnd, L"BUTTON", L"Stop VM", BS_PUSHBUTTON, IdStop, 310, 268, 110, 38);
-
-    g_app.status = Add(hwnd, L"STATIC", L"Ready", 0, IdStatus, 26, 328, 788, 24);
-    g_app.progress = Add(hwnd, PROGRESS_CLASSW, L"", 0, IdProgress, 26, 358, 788, 22);
-    SendMessageW(g_app.progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-
-    g_app.log = Add(hwnd, L"LISTBOX", L"", WS_BORDER | WS_VSCROLL | LBS_NOINTEGRALHEIGHT, IdLog, 26, 398, 788, 220);
-}
-
-static void LoadBundledFont()
-{
-    wchar_t exe[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::filesystem::path font = std::filesystem::path(exe).parent_path() / "assets" / "fonts" / "Poppins-Regular.ttf";
-    if (std::filesystem::exists(font)) AddFontResourceExW(font.c_str(), FR_PRIVATE, nullptr);
-}
-
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    switch (msg)
+    ImGui::BeginDisabled(app.busy);
+    if (ImGui::Button("Install / Start", ImVec2(162, 40)) && !app.busy)
     {
-    case WM_CREATE:
-        g_app.hwnd = hwnd;
-        LoadBundledFont();
-        CreateUi(hwnd);
-        return 0;
-    case WM_COMMAND:
-        switch (LOWORD(wParam))
-        {
-        case IdBrowse:
-            BrowseFolder();
-            return 0;
-        case IdPickImage:
-            PickImage();
-            return 0;
-        case IdInstall:
-            if (!g_app.busy) { SetBusy(true); std::thread(InstallStartConnect, ReadSettings()).detach(); }
-            return 0;
-        case IdConnect:
-            if (!g_app.busy) { SetBusy(true); std::thread(Connect, ReadSettings()).detach(); }
-            return 0;
-        case IdStop:
-            if (!g_app.busy) { SetBusy(true); std::thread(StopVm, ReadSettings()).detach(); }
-            return 0;
-        }
-        break;
-    case WM_APP_LOG:
-        if (wParam == 1)
-        {
-            SetBusy(false);
-            return 0;
-        }
-        if (lParam)
-        {
-            auto* line = (std::wstring*)lParam;
-            AddLogLine(*line);
-            delete line;
-        }
-        return 0;
-    case WM_CTLCOLORSTATIC:
-        SetBkMode((HDC)wParam, TRANSPARENT);
-        return (LRESULT)GetStockObject(WHITE_BRUSH);
-    case WM_DESTROY:
-        DeleteObject(g_titleFont);
-        DeleteObject(g_uiFont);
-        PostQuitMessage(0);
-        return 0;
+        app.busy = true;
+        std::thread(InstallStartConnect, std::ref(app)).detach();
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    ImGui::SameLine();
+    if (ImGui::Button("Connect", ImVec2(116, 40)) && !app.busy)
+    {
+        app.busy = true;
+        std::thread(Connect, std::ref(app)).detach();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Stop VM", ImVec2(116, 40)) && !app.busy)
+    {
+        app.busy = true;
+        std::thread(StopVm, std::ref(app)).detach();
+    }
+    ImGui::EndDisabled();
+}
+
+static void DrawUi(AppState& app)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    ImVec2 screen = io.DisplaySize;
+    bg->AddRectFilled(ImVec2(0, 0), screen, IM_COL32(14, 14, 15, 255));
+    bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(screen.x, 180), IM_COL32(32, 32, 34, 255), IM_COL32(22, 22, 24, 255), IM_COL32(14, 14, 15, 0), IM_COL32(14, 14, 15, 0));
+
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(screen);
+    ImGui::Begin("ez gentoo", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground);
+
+    std::string status;
+    int progress = 0;
+    std::vector<std::string> log;
+    {
+        std::lock_guard<std::mutex> lock(app.mutex);
+        status = app.status;
+        progress = app.progress;
+        log = app.log;
+    }
+
+    ImGui::SetCursorPos(ImVec2(34, 28));
+    ImGui::TextColored(ImVec4(0.96f, 0.96f, 0.96f, 1.0f), "ez gentoo");
+    ImGui::SetCursorPosX(36);
+    ImGui::TextColored(ImVec4(0.62f, 0.63f, 0.66f, 1.0f), "gentoo for larpers. one click, one vm, maximum fake wizard energy.");
+
+    ImGui::SetCursorPos(ImVec2(34, 96));
+    ImGui::BeginChild("config", ImVec2(620, 310), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "setup");
+    ImGui::Spacing();
+    ImGui::BeginDisabled(app.busy);
+    ImGui::TextDisabled("VM name");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##vm", app.vmName, IM_ARRAYSIZE(app.vmName));
+
+    ImGui::TextDisabled("Install folder");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 106);
+    ImGui::InputText("##dir", app.installDir, IM_ARRAYSIZE(app.installDir));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse", ImVec2(96, 0))) BrowseFolder(app);
+
+    ImGui::TextDisabled("Image URL or file");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 106);
+    ImGui::InputText("##image", app.imageSource, IM_ARRAYSIZE(app.imageSource));
+    ImGui::SameLine();
+    if (ImGui::Button("Pick", ImVec2(96, 0))) PickImage(app);
+
+    ImGui::PushItemWidth(150);
+    ImGui::SliderInt("RAM GB", &app.ramGb, 2, 64);
+    ImGui::SameLine(240);
+    ImGui::SliderInt("CPU cores", &app.cpuCount, 1, 32);
+    ImGui::SliderInt("Disk GB", &app.diskGb, 20, 512);
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    DrawButtonRow(app);
+    ImGui::EndChild();
+
+    ImGui::SetCursorPos(ImVec2(674, 96));
+    ImGui::BeginChild("status", ImVec2(screen.x - 708, 310), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "status");
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", status.c_str());
+    ImGui::Spacing();
+    ImGui::ProgressBar(progress / 100.0f, ImVec2(-1, 18), "");
+    ImGui::Spacing();
+    ImGui::TextDisabled("image");
+    ImGui::TextWrapped("%s", app.imageSource);
+    ImGui::Spacing();
+    ImGui::TextDisabled("detected ip");
+    ImGui::TextWrapped("%s", app.currentIp.empty() ? "not yet" : app.currentIp.c_str());
+    ImGui::EndChild();
+
+    ImGui::SetCursorPos(ImVec2(34, 426));
+    ImGui::BeginChild("log", ImVec2(screen.x - 68, screen.y - 460), true);
+    ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "log");
+    ImGui::Separator();
+    for (const auto& line : log) ImGui::TextUnformatted(line.c_str());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
@@ -663,38 +600,175 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_PROGRESS_CLASS };
-    InitCommonControlsEx(&icc);
+    AppState app;
+    strncpy_s(app.installDir, WideToUtf8(DefaultInstallDir()).c_str(), sizeof(app.installDir) - 1);
+    strncpy_s(app.vmName, WideToUtf8(FindDefaultVmName()).c_str(), sizeof(app.vmName) - 1);
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring exeName = std::filesystem::path(exe).stem().wstring();
+    app.autoRun = exeName.find(L"Installer") != std::wstring::npos;
 
-    WNDCLASSEXW wc{ sizeof(wc) };
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
-    wc.lpszClassName = L"EzGentoo";
+    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"EzGentoo", nullptr };
     RegisterClassExW(&wc);
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"ez gentoo", WS_OVERLAPPEDWINDOW, 100, 100, 1040, 720, nullptr, nullptr, wc.hInstance, nullptr);
 
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"ez gentoo", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 860, 680, nullptr, nullptr, hInstance, nullptr);
+    if (!CreateDeviceD3D(hwnd))
+    {
+        CleanupDeviceD3D();
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return 1;
+    }
+
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
 
-    wchar_t exe[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    if (std::filesystem::path(exe).stem().wstring().find(L"Installer") != std::wstring::npos)
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowPadding = ImVec2(0, 0);
+    style.WindowBorderSize = 0;
+    style.WindowRounding = 0;
+    style.ChildRounding = 12;
+    style.ChildBorderSize = 1;
+    style.FrameRounding = 8;
+    style.GrabRounding = 8;
+    style.PopupRounding = 8;
+    style.ScrollbarSize = 4;
+    style.ScrollbarRounding = 8;
+    style.ItemSpacing = ImVec2(10, 8);
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text] = ImVec4(0.94f, 0.94f, 0.95f, 1.00f);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.52f, 0.53f, 0.56f, 1.00f);
+    colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.065f, 1.00f);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.095f, 0.095f, 0.105f, 0.96f);
+    colors[ImGuiCol_Border] = ImVec4(1.00f, 1.00f, 1.00f, 0.07f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.13f, 0.145f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.23f, 0.23f, 0.25f, 1.00f);
+    colors[ImGuiCol_Button] = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.86f, 0.86f, 0.88f, 1.00f);
+    colors[ImGuiCol_SliderGrab] = ImVec4(0.90f, 0.90f, 0.92f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+    colors[ImGuiCol_PlotHistogram] = ImVec4(0.92f, 0.92f, 0.94f, 1.00f);
+    wchar_t exeDir[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    auto fontPath = std::filesystem::path(exeDir).parent_path() / "assets" / "fonts" / "Poppins-Regular.ttf";
+    if (std::filesystem::exists(fontPath))
+        io.FontDefault = io.Fonts->AddFontFromFileTTF(fontPath.string().c_str(), 16.0f);
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
+    if (app.autoRun)
     {
-        SetBusy(true);
-        std::thread(InstallStartConnect, ReadSettings()).detach();
+        app.busy = true;
+        std::thread(InstallStartConnect, std::ref(app)).detach();
     }
 
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0))
+    bool done = false;
+    while (!done)
     {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            if (msg.message == WM_QUIT) done = true;
+        }
+        if (done) break;
+
+        if (g_ResizeWidth != 0 && g_ResizeHeight != 0)
+        {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+            g_ResizeWidth = g_ResizeHeight = 0;
+            CreateRenderTarget();
+        }
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        DrawUi(app);
+        ImGui::Render();
+
+        const float clear_color[4] = { 0.08f, 0.09f, 0.10f, 1.00f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_pSwapChain->Present(1, 0);
     }
 
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    CleanupDeviceD3D();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
     WSACleanup();
     CoUninitialize();
     return 0;
+}
+
+static bool CreateDeviceD3D(HWND hWnd)
+{
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hWnd;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    UINT flags = 0;
+    D3D_FEATURE_LEVEL featureLevel;
+    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, featureLevelArray, 2,
+        D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res == DXGI_ERROR_UNSUPPORTED)
+        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, featureLevelArray, 2,
+            D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res != S_OK) return false;
+    CreateRenderTarget();
+    return true;
+}
+
+static void CleanupDeviceD3D()
+{
+    CleanupRenderTarget();
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+}
+
+static void CreateRenderTarget()
+{
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+    pBackBuffer->Release();
+}
+
+static void CleanupRenderTarget()
+{
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+}
+
+static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+    switch (msg)
+    {
+    case WM_SIZE:
+        if (wParam != SIZE_MINIMIZED) { g_ResizeWidth = LOWORD(lParam); g_ResizeHeight = HIWORD(lParam); }
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
 }

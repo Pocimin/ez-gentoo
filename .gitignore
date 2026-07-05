@@ -3,6 +3,7 @@ dist/
 bin/
 obj/
 external/
+image-work/
 *.exe
 *.obj
 *.pdb

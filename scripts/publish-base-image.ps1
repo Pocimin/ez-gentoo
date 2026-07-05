@@ -84,7 +84,7 @@ Say "Prep VM SSH is at $ip."
 $sanitize = @'
 set -eu
 printf 'ez-gentoo\n' > /etc/hostname
-printf 'reina:gentoo\n' | chpasswd
+printf 'reina:LarpGentoo42!\n' | chpasswd
 passwd -l root >/dev/null 2>&1 || true
 rm -f /root/.ssh/authorized_keys /root/.ssh/known_hosts
 rm -f /home/*/.ssh/authorized_keys /home/*/.ssh/known_hosts 2>/dev/null || true
@@ -123,6 +123,14 @@ ssh -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "root@$ip" "sh
 
 Say "Turning off prep VM."
 Stop-VM -Name $prepVm -TurnOff -Force
+$deadline = (Get-Date).AddMinutes(2)
+while ((Get-Date) -lt $deadline -and (Get-VM -Name $prepVm).State -ne "Off") {
+    Start-Sleep -Seconds 2
+}
+if ((Get-VM -Name $prepVm).State -ne "Off") {
+    throw "$prepVm did not turn off cleanly."
+}
+Remove-VM -Name $prepVm -Force
 
 Say "Compacting image."
 Optimize-VHD -Path $image -Mode Full
