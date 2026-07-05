@@ -1,9 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
+#include <dwmapi.h>
+#include <wininet.h>
 #include <shlobj.h>
 #include <shellapi.h>
-#include <urlmon.h>
 #include <wincrypt.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -12,7 +13,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -26,7 +29,8 @@
 #include "imgui_impl_win32.h"
 
 #pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "urlmon.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -46,6 +50,20 @@ static void CleanupDeviceD3D();
 static void CreateRenderTarget();
 static void CleanupRenderTarget();
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+static void ApplyDarkTitleBar(HWND hwnd)
+{
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+
+    COLORREF caption = RGB(14, 14, 15);
+    COLORREF text = RGB(238, 238, 240);
+    COLORREF border = RGB(38, 38, 42);
+    DwmSetWindowAttribute(hwnd, 35, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, 36, &text, sizeof(text));
+    DwmSetWindowAttribute(hwnd, 34, &border, sizeof(border));
+}
 
 static std::wstring Utf8ToWide(const std::string& s)
 {
@@ -134,7 +152,7 @@ static CommandResult RunHidden(const std::wstring& file, const std::wstring& arg
 
 static CommandResult PowerShell(const std::wstring& script)
 {
-    std::wstring prefix = L"$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8; ";
+    std::wstring prefix = L"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8; ";
     return RunHidden(L"powershell.exe", L"-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + Base64Utf16(prefix + script));
 }
 
@@ -157,6 +175,23 @@ static bool StartsWithHttp(const std::wstring& s)
     return s.rfind(L"http://", 0) == 0 || s.rfind(L"https://", 0) == 0;
 }
 
+static std::string Trim(std::string s)
+{
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    size_t first = 0;
+    while (first < s.size() && (s[first] == ' ' || s[first] == '\t')) ++first;
+    return s.substr(first);
+}
+
+static bool LooksLikeVmName(const std::string& s)
+{
+    if (s.empty() || s.size() > 80 || s.find('<') != std::string::npos || s.find("CLIXML") != std::string::npos)
+        return false;
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == ' ' || c == '-' || c == '_' || c == '.';
+    });
+}
+
 static bool VmExists(const std::wstring& vm)
 {
     auto r = PowerShell(L"if (Get-VM -Name " + PsQuote(vm) + L" -ErrorAction SilentlyContinue) { 'yes' }");
@@ -169,10 +204,14 @@ static std::wstring FindDefaultVmName()
         L"$vms = Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'gentoo' } | "
         L"Sort-Object @{ Expression = { if ($_.Name -eq 'GentooReady') { 0 } elseif ($_.Name -eq 'Gentoo') { 1 } else { 2 } } }, Name | "
         L"Select-Object -First 1 -ExpandProperty Name; $vms");
-    std::string s = r.output;
-    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
-    s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
-    return s.empty() ? L"EzGentoo" : Utf8ToWide(s);
+    std::stringstream lines(r.output);
+    std::string line;
+    while (std::getline(lines, line))
+    {
+        line = Trim(line);
+        if (LooksLikeVmName(line)) return Utf8ToWide(line);
+    }
+    return L"EzGentoo";
 }
 
 struct AppState
@@ -213,6 +252,105 @@ static void SetStatus(AppState& app, const std::string& msg, int progress)
         app.progress = std::clamp(progress, 0, 100);
     }
     Log(app, msg);
+}
+
+static void SetStatusQuiet(AppState& app, const std::string& msg, int progress)
+{
+    std::lock_guard<std::mutex> lock(app.mutex);
+    app.status = msg;
+    app.progress = std::clamp(progress, 0, 100);
+}
+
+static std::string FormatBytes(unsigned long long bytes)
+{
+    char out[64];
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL)
+        snprintf(out, sizeof(out), "%.2f GB", bytes / 1073741824.0);
+    else
+        snprintf(out, sizeof(out), "%.1f MB", bytes / 1048576.0);
+    return out;
+}
+
+static void DownloadHttp(AppState& app, const std::wstring& source, const std::wstring& imagePath)
+{
+    std::wstring tempPath = imagePath + L".partial";
+    DeleteFileW(tempPath.c_str());
+
+    HINTERNET internet = InternetOpenW(L"ez-gentoo", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    if (!internet) throw std::runtime_error("download failed to start");
+
+    HINTERNET url = InternetOpenUrlW(internet, source.c_str(), nullptr, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_UI, 0);
+    if (!url)
+    {
+        InternetCloseHandle(internet);
+        throw std::runtime_error("download url did not open");
+    }
+
+    unsigned long long total = 0;
+    wchar_t length[64]{};
+    DWORD lengthSize = sizeof(length);
+    if (HttpQueryInfoW(url, HTTP_QUERY_CONTENT_LENGTH, length, &lengthSize, nullptr))
+        total = _wcstoui64(length, nullptr, 10);
+
+    HANDLE file = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        InternetCloseHandle(url);
+        InternetCloseHandle(internet);
+        throw std::runtime_error("download file could not be created");
+    }
+
+    std::vector<char> buffer(1024 * 1024);
+    unsigned long long done = 0;
+    DWORD lastTick = 0;
+    for (;;)
+    {
+        DWORD read = 0;
+        if (!InternetReadFile(url, buffer.data(), (DWORD)buffer.size(), &read))
+        {
+            CloseHandle(file);
+            InternetCloseHandle(url);
+            InternetCloseHandle(internet);
+            DeleteFileW(tempPath.c_str());
+            throw std::runtime_error("download failed while reading");
+        }
+        if (read == 0) break;
+
+        DWORD written = 0;
+        if (!WriteFile(file, buffer.data(), read, &written, nullptr) || written != read)
+        {
+            CloseHandle(file);
+            InternetCloseHandle(url);
+            InternetCloseHandle(internet);
+            DeleteFileW(tempPath.c_str());
+            throw std::runtime_error("download failed while writing");
+        }
+
+        done += read;
+        DWORD now = GetTickCount();
+        if (now - lastTick > 250)
+        {
+            lastTick = now;
+            if (total > 0)
+            {
+                int percent = (int)((done * 100ULL) / total);
+                SetStatusQuiet(app, "Downloading base image... " + std::to_string(percent) + "% (" + FormatBytes(done) + " / " + FormatBytes(total) + ")", 20 + (percent * 20 / 100));
+            }
+            else
+            {
+                SetStatusQuiet(app, "Downloading base image... " + FormatBytes(done), 25);
+            }
+        }
+    }
+
+    CloseHandle(file);
+    InternetCloseHandle(url);
+    InternetCloseHandle(internet);
+    if (!MoveFileExW(tempPath.c_str(), imagePath.c_str(), MOVEFILE_REPLACE_EXISTING))
+    {
+        DeleteFileW(tempPath.c_str());
+        throw std::runtime_error("download could not be moved into place");
+    }
 }
 
 static void RequireOk(AppState& app, const CommandResult& r, const std::string& what)
@@ -256,8 +394,8 @@ static std::wstring EnsureImage(AppState& app)
         if (StartsWithHttp(source))
         {
             Log(app, "Downloading base image. This is the long part.");
-            HRESULT hr = URLDownloadToFileW(nullptr, source.c_str(), imagePath.c_str(), 0, nullptr);
-            if (FAILED(hr)) throw std::runtime_error("download failed");
+            DownloadHttp(app, source, imagePath);
+            Log(app, "Download finished.");
         }
         else if (FileExists(source) && source.size() >= 5 && source.substr(source.size() - 5) == L".vhdx")
         {
@@ -489,20 +627,21 @@ static void PickImage(AppState& app)
 
 static void DrawButtonRow(AppState& app)
 {
+    float buttonW = (ImGui::GetContentRegionAvail().x - 24.0f) / 3.0f;
     ImGui::BeginDisabled(app.busy);
-    if (ImGui::Button("Install / Start", ImVec2(162, 40)) && !app.busy)
+    if (ImGui::Button("Install / Start", ImVec2(buttonW, 40)) && !app.busy)
     {
         app.busy = true;
         std::thread(InstallStartConnect, std::ref(app)).detach();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Connect", ImVec2(116, 40)) && !app.busy)
+    if (ImGui::Button("Connect", ImVec2(buttonW, 40)) && !app.busy)
     {
         app.busy = true;
         std::thread(Connect, std::ref(app)).detach();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Stop VM", ImVec2(116, 40)) && !app.busy)
+    if (ImGui::Button("Stop VM", ImVec2(buttonW, 40)) && !app.busy)
     {
         app.busy = true;
         std::thread(StopVm, std::ref(app)).detach();
@@ -537,8 +676,18 @@ static void DrawUi(AppState& app)
     ImGui::SetCursorPosX(36);
     ImGui::TextColored(ImVec4(0.62f, 0.63f, 0.66f, 1.0f), "gentoo for larpers. one click, one vm, maximum fake wizard energy.");
 
+    float gap = 24.0f;
+    float leftW = std::clamp(screen.x * 0.64f, 610.0f, 780.0f);
+    float rightW = screen.x - leftW - 68.0f - gap;
+    if (rightW < 300.0f)
+    {
+        rightW = 300.0f;
+        leftW = screen.x - rightW - 68.0f - gap;
+    }
+    float panelH = 340.0f;
+
     ImGui::SetCursorPos(ImVec2(34, 96));
-    ImGui::BeginChild("config", ImVec2(620, 310), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("config", ImVec2(leftW, panelH), true, ImGuiWindowFlags_NoScrollbar);
     ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "setup");
     ImGui::Spacing();
     ImGui::BeginDisabled(app.busy);
@@ -558,19 +707,31 @@ static void DrawUi(AppState& app)
     ImGui::SameLine();
     if (ImGui::Button("Pick", ImVec2(96, 0))) PickImage(app);
 
-    ImGui::PushItemWidth(150);
-    ImGui::SliderInt("RAM GB", &app.ramGb, 2, 64);
-    ImGui::SameLine(240);
-    ImGui::SliderInt("CPU cores", &app.cpuCount, 1, 32);
-    ImGui::SliderInt("Disk GB", &app.diskGb, 20, 512);
-    ImGui::PopItemWidth();
+    float sliderW = (ImGui::GetContentRegionAvail().x - 20.0f) / 3.0f;
+    ImGui::BeginGroup();
+    ImGui::TextDisabled("RAM GB");
+    ImGui::SetNextItemWidth(sliderW);
+    ImGui::SliderInt("##ram", &app.ramGb, 2, 64);
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextDisabled("CPU cores");
+    ImGui::SetNextItemWidth(sliderW);
+    ImGui::SliderInt("##cpu", &app.cpuCount, 1, 32);
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextDisabled("Disk GB");
+    ImGui::SetNextItemWidth(sliderW);
+    ImGui::SliderInt("##disk", &app.diskGb, 20, 512);
+    ImGui::EndGroup();
     ImGui::EndDisabled();
     ImGui::Spacing();
     DrawButtonRow(app);
     ImGui::EndChild();
 
-    ImGui::SetCursorPos(ImVec2(674, 96));
-    ImGui::BeginChild("status", ImVec2(screen.x - 708, 310), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos(ImVec2(34 + leftW + gap, 96));
+    ImGui::BeginChild("status", ImVec2(rightW, panelH), true, ImGuiWindowFlags_NoScrollbar);
     ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "status");
     ImGui::Spacing();
     ImGui::TextWrapped("%s", status.c_str());
@@ -584,8 +745,8 @@ static void DrawUi(AppState& app)
     ImGui::TextWrapped("%s", app.currentIp.empty() ? "not yet" : app.currentIp.c_str());
     ImGui::EndChild();
 
-    ImGui::SetCursorPos(ImVec2(34, 426));
-    ImGui::BeginChild("log", ImVec2(screen.x - 68, screen.y - 460), true);
+    ImGui::SetCursorPos(ImVec2(34, 456));
+    ImGui::BeginChild("log", ImVec2(screen.x - 68, screen.y - 490), true);
     ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "log");
     ImGui::Separator();
     for (const auto& line : log) ImGui::TextUnformatted(line.c_str());
@@ -610,7 +771,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"EzGentoo", nullptr };
     RegisterClassExW(&wc);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"ez gentoo", WS_OVERLAPPEDWINDOW, 100, 100, 1040, 720, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"ez gentoo", WS_OVERLAPPEDWINDOW, 100, 100, 1180, 760, nullptr, nullptr, wc.hInstance, nullptr);
+    ApplyDarkTitleBar(hwnd);
 
     if (!CreateDeviceD3D(hwnd))
     {

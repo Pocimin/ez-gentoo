@@ -33,12 +33,13 @@ $sources = @(
 ) -join " "
 
 $compile = "/nologo /std:c++20 /EHsc /O2 /DUNICODE /D_UNICODE /Fo`"$build\\`" /Fd`"$build\\ezgentoo.pdb`" /I`"$imgui`" /I`"$imgui\backends`" $sources"
-$link = "/link /SUBSYSTEM:WINDOWS /MANIFESTUAC:`"level='requireAdministrator' uiAccess='false'`" d3d11.lib dxgi.lib urlmon.lib crypt32.lib ws2_32.lib shell32.lib ole32.lib comdlg32.lib user32.lib gdi32.lib advapi32.lib"
+$link = "/link /SUBSYSTEM:WINDOWS /MANIFESTUAC:`"level='requireAdministrator' uiAccess='false'`" d3d11.lib dxgi.lib dwmapi.lib wininet.lib crypt32.lib ws2_32.lib shell32.lib ole32.lib comdlg32.lib user32.lib gdi32.lib advapi32.lib"
 
 cmd /c "`"$vcvars`" && cl $compile /Fe:`"$app\EzGentooInstaller.exe`" $link"
 cmd /c "`"$vcvars`" && cl $compile /Fe:`"$app\EzGentooLauncher.exe`" $link"
 
 Copy-Item (Join-Path $repo "README.md") $app
+Copy-Item (Join-Path $repo "CHANGELOG.md") $app
 Copy-Item (Join-Path $repo "LICENSE") $app
 if (Test-Path (Join-Path $repo "assets")) {
     Copy-Item (Join-Path $repo "assets") $app -Recurse

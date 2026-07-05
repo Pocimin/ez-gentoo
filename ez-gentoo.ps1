@@ -1,6 +1,6 @@
 param(
     [string]$VmName = "EzGentoo",
-    [string]$ImageUrl = "https://github.com/Pocimin/ez-gentoo/releases/latest/download/ez-gentoo-base.vhdx",
+    [string]$ImageUrl = "http://136.243.8.214:8088/ez-gentoo-base.vhdx",
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "EzGentoo"),
     [int]$MemoryGB = 4,
     [int]$CpuCount = 4,
